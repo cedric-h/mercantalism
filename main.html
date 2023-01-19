@@ -1,0 +1,1098 @@
+<!-- vim: sw=2 ts=2 expandtab smartindent ft=javascript
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Hello, world!</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="description" content="" />
+  <style>
+  document, body {
+    margin: 0px;
+    padding: 0px;
+    overflow: hidden;
+  }
+  </style>
+</head>
+<body>
+	<canvas id="game"></canvas>
+<script>
+
+const SECOND_IN_TICKS = 60; 
+const BACKGROUND_COLOR = "hsl(209, 50%, 15%)";
+
+function ease_out_quad(x) { return 1 - (1 - x) * (1 - x); }
+function lerp(v0, v1, t) { return (1 - t) * v0 + t * v1; }
+function inv_lerp(min, max, p) { return (((p) - (min)) / ((max) - (min))); }
+function lerp_rads(a, b, t) {
+  const fmodf = (l, r) => l % r;
+  const difference = fmodf(b - a, Math.PI*2.0),
+        distance = fmodf(2.0 * difference, Math.PI*2.0) - difference;
+  return a + distance * t;
+}
+function mag(x, y) { return Math.sqrt(x*x + y*y); }
+function norm(obj) {
+  const m = mag(obj.x, obj.y);
+  if (m > 0.0)
+    obj.x /= m,
+    obj.y /= m;
+  return obj;
+}
+function point_on_line(p, l0_x, l0_y, l1_x, l1_y) {
+  const line_len = (l1_x - l0_x)*(l1_x - l0_x) +
+                   (l1_y - l0_y)*(l1_y - l0_y);
+  const tri_area_x2 = ((p.x - l0_x) * (l1_x - l0_x)) +
+                      ((p.y - l0_y) * (l1_y - l0_y));
+
+  let U = tri_area_x2/line_len;
+  if (U < 0) U = 0;
+  if (U > 1) U = 1;
+  p.x = l0_x + (U * (l1_x - l0_x));
+  p.y = l0_y + (U * (l1_y - l0_y));
+}
+function point_to_line(   x,    y,
+                       l0_x, l0_y,
+                       l1_x, l1_y) {
+  const p = { x, y };
+  point_on_line(p, l0_x, l0_y, l1_x, l1_y);
+  return mag(p.x - x, p.y - y);
+}
+function pivot(x, y, delta_theta) {
+  return {
+    x: x*Math.cos(delta_theta) - y*Math.sin(delta_theta),
+    y: x*Math.sin(delta_theta) + y*Math.cos(delta_theta)
+  };
+}
+
+const SHIP_STATE_DOCKING = 0;
+const SHIP_STATE_DOCKED  = 1;
+const SHIP_STATE_LEAVING = 2;
+
+const DRAG_STATE_INACTIVE = 0;
+const DRAG_STATE_CAMERA   = 1;
+const DRAG_STATE_SHIP     = 2;
+
+const default_render_cache = () => ({
+  island: { canvas: null },
+  boat:   { canvas: null },
+  barrel: {   hover: { canvas: null },
+            nohover: { canvas: null } },
+});
+let render_cache = default_render_cache();
+const default_state = () => ({
+  tick: 0,
+  island: {
+    gp: 0,
+    barrel_count: 1,
+  },
+  ship: {
+    gp: 100,
+    state: SHIP_STATE_DOCKING,
+    tick_spawn: 0,
+    tick_leave: null,
+    barrel_count: 3,
+    x:  0.10,
+    y: -0.05,
+    window_x: 0.18,
+    window_y: 0.02,
+    window_width: 0.6,
+    window_height: 0.3,
+  },
+  cam_x: -0.15,
+  cam_y: -0.29,
+  mouse_x: 0,
+  mouse_y: 0,
+  drag: {
+    state: DRAG_STATE_INACTIVE,
+    begin_mouse_x: 0,
+    begin_mouse_y: 0,
+  }
+});
+const get_state = () => {
+  /* fetch state from local storage */
+  let state = JSON.parse(window.localStorage.getItem("state"));
+
+  /* nothing in the storage: this is the first run */
+  if (state == null) state = default_state();
+
+  return state;
+}
+const set_state = state =>
+  window.localStorage.setItem("state", JSON.stringify(state));
+
+
+window.onkeydown = e => {
+  if (e.key == "Escape")
+    set_state(default_state());
+}
+window.onmousemove = ({ pageX: x, pageY: y }) => {
+  const state = get_state();
+  state.mouse_x = x / window.innerWidth;
+  state.mouse_y = y / window.innerWidth;
+  set_state(state);
+};
+window.onmousedown = ({ pageX: x, pageY: y }) => {
+  const state = get_state();
+  state.mouse_x = x / window.innerWidth;
+  state.mouse_y = y / window.innerWidth;
+
+  state.drag.state = DRAG_STATE_CAMERA;
+  /* might override ^ */
+  ship_ui(state, state.ship, "mousedown");
+
+  state.drag.begin_mouse_x = state.mouse_x;
+  state.drag.begin_mouse_y = state.mouse_y;
+
+  set_state(state);
+}
+window.onmouseup = ({ pageX: x, pageY: y }) => {
+  const state = get_state();
+  state.mouse_x = x / window.innerWidth;
+  state.mouse_y = y / window.innerWidth;
+
+  if (state.drag.state == DRAG_STATE_CAMERA) {
+    state.drag.state = DRAG_STATE_INACTIVE;
+    state.cam_x -= state.mouse_x - state.drag.begin_mouse_x;
+    state.cam_y -= state.mouse_y - state.drag.begin_mouse_y;
+  }
+  if (state.drag.state == DRAG_STATE_SHIP) {
+    state.drag.state = DRAG_STATE_INACTIVE;
+    ship_ui(state, state.ship, "mouseup");
+  }
+  set_state(state);
+};
+window.onload = function frame(elapsed) {
+  requestAnimationFrame(frame);
+  if (!isFinite(elapsed)) return;
+
+  const state = get_state();
+  update(state);
+  render(state, elapsed);
+  set_state(state);
+}
+
+function update(state) {
+
+  /* doing timing via ticks rather than setTimeouts allows for
+   * more hot-swappability (how do you serialize a setTimeout?) */
+  state.tick++;
+
+}
+
+const DOCK_START_X = 0.5 - 0.11;
+const DOCK_START_Y = 0.5 - 0.11;
+const DOCK_END_X   = 0.5 - 0.20;
+const DOCK_END_Y   = 0.5 - 0.30;
+
+function draw_island(state, ctx, elapsed) {
+  const cache = render_cache.island;
+
+  if (!cache.canvas) {
+    const w = window.innerWidth;
+
+    cache.canvas = document.createElement('canvas');
+    cache.canvas.width = w;
+    cache.canvas.height = w;
+
+    const cache_ctx = cache.canvas.getContext("2d");
+    cache_ctx.scale(w, w);
+
+    island("render_bg", state, { ctx: cache_ctx, elapsed });
+  }
+
+  const bg = cache.canvas;
+  ctx.drawImage(bg, 0, 0, bg.width, bg.height, 0, 0, 1, 1);
+  island("render_fg", state, { ctx, elapsed });
+}
+function island(mode, state, { ctx, elapsed }={}) {
+  const render_bg    = mode == "render_bg";
+  const render_fg    = mode == "render_fg";
+  const hover_barrel = mode == "hover_barrel";
+
+  let ix = 0.5;
+  let iy = 0.5;
+
+  /* island landmass */
+  if (render_bg) {
+    ctx.beginPath();
+    const MAX = 11;
+    for (let i = 0; i <= MAX; i++) {
+      const theta = 2*Math.PI * (i/MAX);
+      ctx[i ? 'lineTo' : 'moveTo'](
+        ix + 0.2*Math.cos(theta),
+        iy + 0.2*Math.sin(theta),
+      );
+    }
+    ctx.strokeStyle = "hsl(109, 30%, 32%)";
+    ctx.lineWidth = 0.004;
+    ctx.stroke();
+  }
+
+  const plank = (beg_x, beg_y, end_x, end_y, width=0.010) => {
+    const d = norm({ x: beg_x - end_x,
+                     y: beg_y - end_y });
+    const dx = -d.y;
+    const dy =  d.x;
+
+    ctx.moveTo(beg_x - dx*width, beg_y - dy*width);
+    ctx.lineTo(beg_x + dx*width, beg_y + dy*width);
+    ctx.lineTo(end_x + dx*width, end_y + dy*width);
+    ctx.lineTo(end_x - dx*width, end_y - dy*width);
+    ctx.lineTo(beg_x - dx*width, beg_y - dy*width);
+  }
+  const stud = (x, y) => {
+    const MAX = 5;
+    for (let i = 0; i <= MAX; i++) {
+      const theta = 2*Math.PI * (i/MAX);
+      ctx[i ? 'lineTo' : 'moveTo'](
+        x + 0.02*Math.cos(theta + Math.PI*3*(x+y)),
+        y + 0.02*Math.sin(theta + Math.PI*3*(x+y)),
+      );
+    }
+  };
+
+  const PLANK_LEN = (0.085)/2;
+  const from_x = DOCK_START_X;
+  const from_y = DOCK_START_Y;
+  const   to_x = DOCK_END_X;
+  const   to_y = DOCK_END_Y;
+
+  const d = { x: to_x - from_x,
+              y: to_y - from_y }
+  const plank_count = Math.ceil(mag(d.x, d.y) / 0.035);
+  const stud_count = Math.ceil(mag(d.x, d.y) / 0.175);
+  norm(d);
+  const dx = -d.y;
+  const dy =  d.x;
+
+  if (render_bg) {
+    ctx.beginPath();
+    for (let i = 0; i <= plank_count; i++) {
+      const t = i / plank_count;
+      const x = lerp(from_x, to_x, t);
+      const y = lerp(from_y, to_y, t);
+
+      plank(
+        x - dx*PLANK_LEN, y - dy*PLANK_LEN,
+        x + dx*PLANK_LEN, y + dy*PLANK_LEN,
+      );
+    }
+    ctx.strokeStyle = "hsl(22, 20%, 30%)";
+    ctx.fillStyle = BACKGROUND_COLOR;
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.beginPath();
+    for (let i = 0; i <= stud_count; i++) {
+      const t = i / stud_count;
+
+      const x = lerp(from_x, to_x, t);
+      const y = lerp(from_y, to_y, t);
+
+      stud(x - dx*PLANK_LEN, y - dy*PLANK_LEN);
+      stud(x + dx*PLANK_LEN, y + dy*PLANK_LEN);
+    }
+    ctx.strokeStyle = "hsl(22, 20%, 23%)";
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  /* fire */
+  {
+    const x = 0.575;
+    const y = 0.575;
+
+    const circ = (cx, cy, size, t=0) => {
+      const MAX = 7;
+      for (let i = 0; i <= MAX; i++) {
+        const theta = 2*Math.PI * (i/MAX);
+        ctx[i ? 'lineTo' : 'moveTo'](
+          (cx+x) + size*Math.cos(t+theta + Math.PI*3*(x+y)),
+          (cy+y) + size*Math.sin(t+theta + Math.PI*3*(x+y)),
+        );
+      }
+    }
+
+    if (render_bg) {
+      ctx.beginPath();
+      circ(0, 0, 0.05);
+      ctx.strokeStyle = "hsl(22, 0%, 23%)";
+      ctx.stroke();
+
+      ctx.beginPath();
+      plank(x - 0.020, y - 0.023,
+            x + 0.025, y + 0.015, 0.007);
+      plank(x + 0.020, y - 0.022,
+            x - 0.018, y + 0.020, 0.007);
+      ctx.strokeStyle = "hsl(22, 70%, 19%)";
+      ctx.stroke();
+    }
+
+    if (render_fg) {
+      for (let f_i = 0; f_i < 2; f_i++) {
+        const size = f_i ? 0.017 : 0.011;
+        const now = elapsed + f_i*66;
+        const fx = 0.04*size*Math.cos(10 * (now / 1000 -   0));
+        const fy = 0.04*size*Math.sin( 5 * (now / 1000 - 1.5));
+        const t = 0.3 * (f_i ? 1 : -1) * Math.cos(0.5 * now / 1000);
+
+        ctx.beginPath();
+        const MAX = 3;
+        for (let i = 0; i <= MAX; i++) {
+          const theta = 2*Math.PI * (i/MAX);
+          ctx[i ? 'lineTo' : 'moveTo'](
+            (fx+x) + size*Math.cos(f_i+t+theta),
+            (fy+y) + size*Math.sin(f_i+t+theta),
+          );
+        }
+        ctx.strokeStyle = f_i ? "hsl(22, 80%, 23%)"
+                              : "hsl(22, 80%, 29%)";
+        ctx.stroke();
+      }
+
+      /* smoke */
+      const now = elapsed / 1000;
+      const dx = Math.cos(now*0.01);
+      const dy = Math.sin(now*0.01);
+      const pi_MAX = 5;
+      for (let pi_i = 0; pi_i < pi_MAX; pi_i++) {
+        const pi = pi_i + now % 1.0;
+
+        const piq = ease_out_quad(pi/pi_MAX)*pi;
+        const px = (dx*(0.18 + piq*0.10) + dx*pi*0.08)*0.1;
+        const py = (dy*(0.18 + piq*0.10) + dy*pi*0.08)*0.1;
+        const radius = (0.1 + pi*0.025)*0.1;
+
+        ctx.beginPath();
+        const MAX = 3;
+        for (let i = 0; i <= MAX; i++) {
+          const theta = 2*Math.PI * (i/MAX) + now*0.05 + pi;
+          ctx[i ? 'lineTo' : 'moveTo'](
+            (px+x) + radius*Math.cos(theta),
+            (py+y) + radius*Math.sin(theta),
+          );
+        }
+
+        let a = 0.45 + 0.05*pi;
+        if (pi < 1) a *= pi;
+        if (pi > (pi_MAX-1)) a *= 1 - now % 1.0;
+        ctx.globalAlpha = a;
+        ctx.strokeStyle = `hsl(22, 20%, 38%)`;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  const barrel_count = state.island.barrel_count;
+
+  let highlight_barrel, i = 0;
+  const barrelhack = (x, y, angle) => {
+    if (render_fg) {
+      highlight_barrel ??= island("hover_barrel", state);
+      const highlight = i == highlight_barrel;
+      barrel(state, ctx, "render", x, y, angle, { highlight });
+    }
+    if (hover_barrel) {
+      if (barrel(state, ctx, "hover", x, y, angle)) {
+        highlight_barrel = i;
+      }
+    }
+    i++;
+  }
+
+  for (let i = 0; i < Math.floor(barrel_count/3); i++) {
+    const x = ix - 0.018 - 0.04*i;
+    let r = 0.08*Math.cos(x*100);
+    barrelhack(x, iy + 0.03,  Math.PI*0.48-r),
+    r = 0.08*Math.cos(x*180);
+    barrelhack(x, iy - 0.03, -Math.PI*0.41+r);
+    barrelhack(x, iy - 0.09, -Math.PI*0.41+r);
+  }
+
+  if (barrel_count%3 == 1) {
+    const x = ix - 0.018 - 0.04*Math.floor(barrel_count/3);
+    barrelhack(x, iy       ,  Math.PI*0.51);
+  }
+  if (barrel_count%3 == 2) {
+    const x = ix - 0.018 - 0.04*Math.floor(barrel_count/3);
+    let r = 0.08*Math.cos(x*100);
+    barrelhack(x, iy + 0.03,  Math.PI*0.48-r),
+    r = 0.08*Math.cos(x*180);
+    barrelhack(x, iy - 0.03, -Math.PI*0.41+r);
+  }
+
+  if (hover_barrel) {
+    const { island_barrel_i } = ship_ui(state, state.ship, "hover_barrel");
+    return island_barrel_i ?? highlight_barrel ?? -1;
+  }
+}
+
+function ship_ui(state, ship, mode, { ctx, elapsed }={}) {
+  const mode_render       = mode == "render";
+  const mode_ui           = mode == "ui";
+  const mode_mousedown    = mode == "mousedown";
+  const mode_mouseup      = mode == "mouseup";
+  const mode_hover        = mode == "hover";
+  const mode_hover_barrel = mode == "hover_barrel";
+
+  let hover_barrel_ret = {};
+
+  if ((mode_ui || mode_mousedown) && ship.state != SHIP_STATE_DOCKED) return;
+
+  if (mode_render || mode_hover_barrel) {
+    let x = DOCK_END_X;
+    let y = DOCK_END_Y;
+
+    let d = norm({ x: DOCK_END_X - DOCK_START_X,
+                   y: DOCK_END_Y - DOCK_START_Y });
+    x += d.x * 0.08;
+    y += d.y * 0.08;
+
+    const px = -d.y;
+    const py =  d.x;
+
+    const start_x = x - px*0.5;
+    const start_y = y - py*0.5;
+    const   end_x = x + px*0.5;
+    const   end_y = y + py*0.5;
+    const dist = mag(start_x - end_x, start_y - end_y);
+
+    if (ship.state == SHIP_STATE_DOCKING) {
+      const trip_ticks = SECOND_IN_TICKS * (dist / 0.1);
+      let t = (state.tick - ship.tick_spawn) / trip_ticks;
+      if (t < 1) {
+        if (ship.tick_leave != null) t = 1 - ease_out_quad(1 - t);
+        else                         t =     ease_out_quad(    t);
+        x = lerp(start_x, x, t);
+        y = lerp(start_y, y, t);
+      } else
+        ship.state = SHIP_STATE_DOCKED;
+    }
+    if (ship.state == SHIP_STATE_LEAVING) {
+      const trip_ticks = SECOND_IN_TICKS * (dist / 0.1);
+      let t = (state.tick - ship.tick_leave) / trip_ticks;
+      if (t < 1) {
+        if (ship.tick_leave != null) t = 1 - ease_out_quad(1 - t);
+        else                         t =     ease_out_quad(    t);
+        x = lerp(x, end_x, t);
+        y = lerp(y, end_y, t);
+      }
+      else
+        ;
+    }
+
+    const angle = Math.atan2(end_y - start_y, end_x - start_x);
+    if (mode_render) {
+      boat_big("render", state, x, y, angle, ship.barrel_count, {
+        ctx,
+        highlight_barrel: ship_ui(state, ship, "hover_barrel").ship_barrel_i
+      });
+      return;
+    }
+    if (mode_hover_barrel)
+      hover_barrel_ret.ship_barrel_i =
+        boat_big("hover_barrel",
+          state, x, y, angle, ship.barrel_count);
+    // draw_boat_small(state, ctx, 0.1,  0.20, ship.barrel_count);
+  }
+
+  const aabb = {
+    x: ship.window_x,
+    y: ship.window_y,
+    w: ship.window_width,
+    h: ship.window_height 
+  };
+
+  if (state.drag.state == DRAG_STATE_SHIP) {
+    aabb.x += state.mouse_x - state.drag.begin_mouse_x;
+    aabb.y += state.mouse_y - state.drag.begin_mouse_y;
+  }
+
+  if (mode_mouseup) {
+    ship.window_x += state.mouse_x - state.drag.begin_mouse_x;
+    ship.window_y += state.mouse_y - state.drag.begin_mouse_y;
+  }
+
+  let hovered = {};
+
+  for (let side = 0; side < 2; side++) {
+    const side_ship   = side == 0;
+    const side_island = side == 1;
+
+    const   inv = side_ship ? ship : state.island;
+    const o_inv = side_ship ? state.island : ship;
+    const title = side_ship ? "FISH BOAT" : `YOU | ${inv.gp}gp`;
+
+    if (mode_ui) ctx.save();
+    let { x, y, w, h } = aabb;
+    w /= 2;
+    x += side*w;
+
+    const mwx = (state.mouse_x - x) / w;
+    const mwy = (state.mouse_y - y) / w;
+    const s_key = 'side' + side;
+    hovered[s_key] = mwx > 0 && mwx < 1    &&
+                     mwy > 0 && mwy < (h/w) ;
+    if (!mode_hover) hovered = ship_ui(state, ship, "hover");
+
+    let clr_border, clr_bg;
+    if (hovered[s_key] && !hovered.stolen_focus) {
+      clr_bg     = "hsl(209, 50%, 20%)";
+      clr_border = "hsl(209, 28%, 50%)";
+    } else {
+      clr_bg     = "hsl(209, 50%, 15%)";
+      clr_border = "hsl(209, 28%, 45%)";
+    }
+
+    /* draw window outline, units now window size */
+    const line_width = 0.004 / w;
+    if (mode_ui) {
+      ctx.lineWidth = line_width;
+
+      ctx.translate(x, y);
+      ctx.scale(w, w);
+
+      ctx.fillStyle = clr_bg;
+      ctx.fillRect(0, 0, 1, h/w);
+    }
+
+    {
+      const wh = window.innerHeight;
+      const fh = wh/45/wh/w;
+
+      const text_fill = "hsl(209, 32%, 65%)";
+      const text_fill_red = "hsl(359, 32%, 65%)";
+      const text_fill_green = "hsl(109, 32%, 65%)";
+      if (mode_ui) ctx.font = fh + 'px monospace';
+
+      let y = 0;
+      const hr = () => {
+        y += fh*0.4;
+        if (mode_ui) {
+          ctx.beginPath();
+          ctx.moveTo(0, y); ctx.lineTo(1, y);
+          ctx.lineWidth = line_width * 0.7;
+          ctx.strokeStyle = clr_border;
+          ctx.stroke();
+        }
+        y += fh*0.4;
+      }
+
+      y += fh;
+      if (mode_ui) {
+        ctx.fillStyle = text_fill;
+        ctx.fillText(title, fh*0.3, y);
+      }
+      hr();
+
+      const entry_count = inv.barrel_count + side_ship;
+
+      const entry_pad = fh*0.4;
+      const entry_height = 0.26;
+      const height_need = w *
+        (y + entry_count*(entry_pad*2 + entry_height) - fh*0.4);
+      if (height_need > ship.window_height)
+        ship.window_height = height_need;
+
+      let highlight_i
+      if (mode_ui) {
+        highlight_i = side_island
+          ? island("hover_barrel", state)
+          : ship_ui(state, ship, "hover_barrel").ship_barrel_i + 1;
+      }
+
+      for (let i = 0; i < entry_count; i++) {
+        const top_y = y;
+        const key = s_key + 'entry' + i;
+
+        const entry_y = top_y + entry_height;
+
+        const btn = (action, txt_clr, btn_x, btn_y) => {
+          const btn_key = s_key + 'entry' + i + 'buy';
+          if (hovered[btn_key] && mode_ui) {
+            const { btn_x, btn_y, btn_w, btn_h } = hovered[btn_key];
+            ctx.fillStyle = "hsl(209, 50%, 30%)";
+            ctx.fillRect(btn_x, btn_y, btn_w, btn_h);
+          }
+
+          if (mode_ui) {
+            ctx.fillStyle = txt_clr;
+            ctx.fillText(action, btn_x, btn_y-fh*0.0075);
+          }
+          const btn_w = 0.05 * action.length;
+          const btn_h = 0.08;
+          btn_x -= btn_w*0.125;
+          btn_y -= btn_h*0.8;
+          const btn_hover =
+            mwx > btn_x && mwx < (btn_x + btn_w) &&
+            mwy > btn_y && mwy < (btn_y + btn_h) ;
+
+          if (mode_hover && btn_hover)
+            hovered[btn_key] = { btn_x, btn_y, btn_w, btn_h };
+
+          if (mode_mousedown && btn_hover) {
+            return true;
+          }
+
+          if (mode_ui) {
+            ctx.lineWidth = line_width * (btn_hover ? 1.2 : 0.6);
+            ctx.strokeRect(btn_x, btn_y,
+                           btn_w, btn_h);
+          }
+        }
+
+        /* change bg if hovered */
+        const highlight = highlight_i == i || hovered[key];
+        if (mode_ui && highlight) {
+          ctx.fillStyle   = "hsl(209, 50%, 20%)";
+          const pad = entry_pad - line_width*0.5;
+          ctx.fillRect(0, top_y-pad, 1, entry_height + pad*2);
+        }
+
+        /* relative mouse pos debug */
+        if (mode_ui, 0) {
+          ctx.fillStyle = "red";
+          ctx.fillRect(mwx, mwy, 0.04, 0.04);
+        }
+        if ((mode_hover_barrel || mode_hover) && hovered[s_key]) {
+          const min = top_y - entry_pad;
+          const max = top_y + entry_pad + entry_height;
+          if (mwy > min && mwy < max) {
+            hovered[key] = 1;
+            hovered.stolen_focus = 1;
+            if (side_ship) hover_barrel_ret.ship_barrel_i = i - 1;
+            if (side_island) hover_barrel_ret.island_barrel_i = i;
+          }
+        }
+
+        y += fh*1.2;
+        if (i == 0 && side_ship) {
+          if (mode_ui) {
+            ctx.fillStyle = text_fill;
+            ctx.fillText(title, fh*7.4, y);
+          }
+          y += fh*0.45;
+          if (mode_ui) {
+            ctx.save();
+            ctx.translate(fh*5, y + fh*0.1);
+            ctx.scale(2, 2);
+            boat_big("render", state, 0, 0, 0, ship.barrel_count, { ctx });
+            ctx.restore();
+          }
+
+          const btn_key = s_key + 'entry' + i + 'buy';
+          if (hovered[btn_key] && mode_ui) {
+            const { btn_x, btn_y, btn_w, btn_h } = hovered[btn_key];
+            ctx.fillStyle = "hsl(209, 50%, 30%)";
+            ctx.fillRect(btn_x, btn_y, btn_w, btn_h);
+          }
+
+          if (btn("DISMISS", text_fill_red, fh* 8.5, y + fh* 1.0)) {
+            ship.state = SHIP_STATE_LEAVING;
+            ship.tick_leave = state.tick;
+            return true;
+          }
+        } else {
+          const val = 20;
+
+          if (mode_ui) {
+            ctx.fillStyle = text_fill;
+            ctx.fillText("Barrel o'", fh*3.8, y);
+            ctx.fillText("Herring"  , fh*3.8, y + fh);
+
+            const valstr = (''+val).padStart(5);
+            ctx.fillText(valstr, fh* 8.5, y + fh*0.2);
+            ctx.fillText(  "gp", fh*11.5, y + fh*0.2);
+          }
+
+          const action = side_ship ? "BUY" : "SELL";
+          let txt_clr;
+          if (action == "BUY" ) txt_clr = text_fill_red;
+          if (action == "SELL") txt_clr = text_fill_green;
+          if (btn(action, txt_clr, fh*10.5, y + fh* 1.5)) {
+            if (inv.barrel_count > 0 && o_inv.gp >= val) {
+              inv.barrel_count--;
+              inv.gp += val;
+
+              o_inv.gp -= val;
+              o_inv.barrel_count++;
+
+              state.drag.state = DRAG_STATE_INACTIVE;
+              return true;
+            }
+          }
+
+          y += fh*0.45;
+          if (mode_ui) {
+            ctx.save();
+            ctx.translate(fh*2, y);
+            ctx.scale(3, 3);
+            barrel(state, ctx, "render", 0, 0, Math.PI/2,
+                   { highlight });
+            ctx.restore();
+          }
+        }
+
+
+        y = entry_y;
+        hr();
+      }
+    }
+
+    /* border */
+    if (mode_ui) {
+      ctx.strokeStyle = clr_border;
+      ctx.strokeRect(0, 0, 1, h/w);
+    }
+    if (mode_ui) ctx.restore();
+  }
+
+  if (mode_mousedown) {
+    if (hovered['side0'] || hovered['side1']) {
+      state.drag.state = DRAG_STATE_SHIP;
+      return true;
+    }
+    else
+      return false;
+  }
+
+  if (mode_hover) {
+    return hovered;
+  }
+
+  if (mode_hover_barrel)
+    return hover_barrel_ret;
+}
+
+function barrel(state, ctx, mode, x, y, angle, { highlight }={}) {
+  const mode_render = mode == "render"; // hover
+  const mode_hover  = mode == "hover"; // x, y, angle
+
+  const hover = barrel_raw(state, ctx, "hover", { x, y, angle });
+  highlight ??= hover;
+
+  if (mode_hover) {
+    return hover;
+  }
+  if (mode_render) {
+    const cache = highlight
+      ? render_cache.barrel.  hover
+      : render_cache.barrel.nohover;
+
+    const w = 0.1;
+    if (!cache.canvas) {
+
+      cache.canvas = document.createElement('canvas');
+      cache.canvas.width = w * window.innerWidth;
+      cache.canvas.height = w * window.innerWidth;
+
+      const cache_ctx = cache.canvas.getContext("2d");
+      cache_ctx.scale(window.innerWidth, window.innerWidth);
+      cache_ctx.translate(w/2, w/2);
+
+      barrel_raw(state, cache_ctx, "render", { highlight });
+    }
+
+    const bg = cache.canvas;
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.drawImage(bg, 0, 0, bg.width, bg.height, -w/2, -w/2, w, w);
+    ctx.restore();
+  }
+}
+
+function barrel_raw(state, ctx, mode, { highlight, x, y, angle }) {
+  x     ??= 0;
+  y     ??= 0;
+  angle ??= 0;
+
+  const mode_render = mode == "render"; // highlight
+  const mode_hover  = mode == "hover"; // x, y, angle
+
+  const bow_x = x + 0.0272;
+  const bow_y = y;
+
+  const stern_x = x - 0.0272;
+  const stern_y = y;
+
+  if (mode_hover) {
+    const s = 0.5;
+
+    const bow   = pivot(0.8*(  bow_x - x), 0.8*(  bow_y - y), angle);
+    const stern = pivot(0.8*(stern_x - x), 0.8*(stern_y - y), angle);
+    const dist = point_to_line(
+      state.mouse_x + state.cam_x, state.mouse_y + state.cam_y,
+      x +   bow.x, y +   bow.y,
+      x + stern.x, y + stern.y
+    );
+    return dist < 0.017;
+  }
+
+  const side = dir => {
+    const width = 0.01408;
+    ctx.lineTo(bow_x, bow_y + width*dir*0.8);
+    ctx.lineTo(
+      lerp(bow_x, stern_x, 0.075),
+      stern_y + width*dir*0.95
+    );
+    ctx.lineTo(
+      lerp(bow_x, stern_x, 0.15),
+      stern_y + width*dir*1.1
+    );
+    ctx.lineTo(
+      lerp(bow_x, stern_x, 0.35),
+      stern_y + width*dir*1.25
+    );
+    ctx.lineTo(
+      lerp(bow_x, stern_x, 0.65),
+      stern_y + width*dir*1.25
+    );
+    ctx.lineTo(
+      lerp(bow_x, stern_x, 0.85),
+      stern_y + width*dir*1.1
+    );
+    ctx.lineTo(
+      lerp(bow_x, stern_x, 0.925),
+      stern_y + width*dir*0.95
+    );
+    ctx.lineTo(stern_x, stern_y + width*dir*0.8);
+    ctx.lineTo(stern_x, stern_y);
+  }
+
+  ctx.beginPath();
+
+  ctx.moveTo(  bow_x,   bow_y); side( 1);
+  ctx.moveTo(  bow_x,   bow_y); side(-1);
+
+  ctx.strokeStyle = highlight ? "hsl(22, 24%, 40%)"
+                              : "hsl(22, 24%, 30%)";
+  ctx.lineWidth = 0.004;
+  // ctx.fill();
+  ctx.stroke();
+}
+
+function draw_boat_small(state, ctx, x, y, barrel_count) {
+  const bow_x = x + 0.1;
+  const bow_y = y;
+
+  const stern_x = x - 0.1;
+  const stern_y = y;
+
+  const side = dir => {
+    const width = 0.03;
+    ctx.lineTo(
+      lerp(bow_x, stern_x, 0.2),
+      stern_y + width*dir*0.9
+    );
+    ctx.lineTo(
+      lerp(bow_x, stern_x, 0.5),
+      stern_y + width*dir*1.3
+    );
+    ctx.lineTo(
+      lerp(bow_x, stern_x, 0.85),
+      stern_y + width*dir*1.2
+    );
+    ctx.lineTo(stern_x, stern_y + width*dir*0.7);
+    ctx.lineTo(stern_x, stern_y);
+  }
+
+  ctx.beginPath();
+
+  ctx.moveTo(  bow_x,   bow_y); side( 1);
+  ctx.moveTo(  bow_x,   bow_y); side(-1);
+
+  ctx.strokeStyle = "hsl(25, 25%, 32%)";
+  ctx.lineWidth = 0.004;
+  // ctx.fill();
+  ctx.stroke();
+
+  const n = barrel_count;
+  if (n % 2) barrel(state, ctx, stern_x - 0.024, y, Math.PI/2);
+  if (n > 1) barrel(state, ctx, x - 0.04, y - 0.058, -Math.PI*0.03),
+             barrel(state, ctx, x - 0.04, y + 0.058,  Math.PI*0.03);
+  if (n > 3) barrel(state, ctx, x + 0.03, y - 0.055,  Math.PI*0.04),
+             barrel(state, ctx, x + 0.03, y + 0.055, -Math.PI*0.04);
+}
+
+function boat_big(mode, state, x, y, angle, barrel_count, { ctx, highlight_barrel }={}) {
+  const render = mode == "render";
+  const hover_barrel = mode == "hover_barrel";
+
+  const bow_x = x + 0.08;
+  const bow_y = y;
+
+  const stern_x = x - 0.064;
+  const stern_y = y;
+
+  const side = (ctx, dir) => {
+    const _bow_x = bow_x - x;
+    const _bow_y = bow_y - y;
+    const _stern_x = stern_x - x;
+    const _stern_y = stern_y - y;
+
+    const width = 0.034;
+    ctx.lineTo(
+      lerp(_bow_x, _stern_x, 0.13),
+      _stern_y + width*dir*0.625
+    );
+    ctx.lineTo(
+      lerp(_bow_x, _stern_x, 0.23),
+      _stern_y + width*dir*0.95
+    );
+    ctx.lineTo(
+      lerp(_bow_x, _stern_x, 0.31),
+      _stern_y + width*dir*1.11
+    );
+    ctx.lineTo(
+      lerp(_bow_x, _stern_x, 0.91),
+      _stern_y + width*dir*0.98
+    );
+    ctx.lineTo(
+      lerp(_bow_x, _stern_x, 0.93),
+      _stern_y + width*dir*0.93
+    );
+    ctx.lineTo(
+      lerp(_bow_x, _stern_x, 0.97),
+      _stern_y + width*dir*0.7
+    );
+    ctx.lineTo(
+      lerp(_bow_x, _stern_x, 0.995),
+      _stern_y + width*dir*0.35
+    );
+    ctx.lineTo(_stern_x, _stern_y);
+  }
+
+  const draw_boat = ctx => {
+    ctx.beginPath();
+
+    ctx.moveTo(bow_x - x, bow_y - y); side(ctx,  1);
+    ctx.moveTo(bow_x - x, bow_y - y); side(ctx, -1);
+
+    ctx.strokeStyle = "hsl(22, 20%, 35%)";
+    ctx.lineWidth = 0.004;
+    // ctx.fill();
+    ctx.stroke();
+  }
+
+  if (render) {
+    const cache = render_cache.boat;
+
+    const w = 0.3;
+    if (!cache.canvas, 1) {
+
+      cache.canvas = document.createElement('canvas');
+      cache.canvas.width = w * window.innerWidth;
+      cache.canvas.height = w * window.innerWidth;
+
+      const cache_ctx = cache.canvas.getContext("2d");
+      cache_ctx.scale(window.innerWidth, window.innerWidth);
+      cache_ctx.translate(w/2, w/2);
+
+      draw_boat(cache_ctx);
+    }
+    const bg = cache.canvas;
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+
+    ctx.drawImage(bg, 0, 0, bg.width, bg.height, -w/2, -w/2, w, w);
+    // draw_boat(ctx);
+
+    ctx.restore();
+  }
+
+  /* if i were to do it all over again,
+   * i'd use a WebGL renderer with my own ctx-ish matrix
+   * abstraction, then I could use it in logic and rendering
+   * and we wouldn't need evil shit like this ... but it works */
+  let hover_barrel_ret;
+  let i = 0;
+  const barrelhack = (bx, by, b_angle) => {
+    const p_b = pivot(stern_x - x + bx, by, angle);
+    bx = x + p_b.x;
+    by = y + p_b.y;
+    b_angle += angle;
+    if (render) {
+      const highlight = i == highlight_barrel;
+      barrel(state, ctx, "render", bx, by, b_angle, { highlight });
+    }
+    if (hover_barrel) {
+      if (barrel(state, ctx, "hover", bx, by, b_angle)) {
+        hover_barrel_ret = i;
+      }
+    }
+    i++;
+  };
+
+  if (barrel_count == 1)
+    barrelhack(-0.018,  0   ,  Math.PI*0.50);
+  if (barrel_count > 1)
+    barrelhack(-0.018,  0.03,  Math.PI*0.45),
+    barrelhack(-0.018, -0.03, -Math.PI*0.45);
+  if (barrel_count == 3)
+    barrelhack(-0.058,  0   ,  Math.PI*0.50);
+  if (barrel_count > 3)
+    barrelhack(-0.058,  0.03,  Math.PI*0.45),
+    barrelhack(-0.058, -0.03, -Math.PI*0.45);
+
+  if (hover_barrel)
+    return hover_barrel_ret;
+}
+
+let canvas, ctx;
+
+(window.onresize = () => {
+  render_cache = default_render_cache();
+  canvas ??= document.getElementById("game");
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+})();
+
+function render(state, elapsed) {
+  /* initialize canvas */
+  canvas ??= document.getElementById("game");
+  ctx ??= canvas.getContext("2d", { alpha: false });
+
+  /* clear canvas */
+  ctx.lineWidth = 0.004;
+  ctx.fillStyle = BACKGROUND_COLOR;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.save(); {
+    /* make the window wider, it'll zoom.
+     * make the window longer, it'll just show more.
+     *
+     * also, instead of pixels the units are now "screen widths" */
+    ctx.scale(canvas.width, canvas.width);
+
+    {
+      let cam_x = state.cam_x;
+      let cam_y = state.cam_y;
+      if (state.drag.state == DRAG_STATE_CAMERA) {
+        cam_x -= state.mouse_x - state.drag.begin_mouse_x;
+        cam_y -= state.mouse_y - state.drag.begin_mouse_y;
+      }
+      ctx.translate(-cam_x, -cam_y);
+    }
+
+    draw_island(state, ctx, elapsed);
+
+    ship_ui(state, state.ship, "render", { ctx, elapsed });
+
+  }; ctx.restore();
+
+  ctx.save(); {
+    ctx.scale(canvas.width, canvas.width);
+
+    ship_ui(state, state.ship, "ui", { ctx });
+  }; ctx.restore();
+};
+
+</script>
+</body>
+</html>
