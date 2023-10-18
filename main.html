@@ -65,9 +65,26 @@ function pivot(x, y, delta_theta) {
   };
 }
 
-const SHIP_STATE_DOCKING = 0;
-const SHIP_STATE_DOCKED  = 1;
-const SHIP_STATE_LEAVING = 2;
+const SHIP_STATE_UNINIT  = 0;
+const SHIP_STATE_DOCKING = 1;
+const SHIP_STATE_DOCKED  = 2;
+const SHIP_STATE_LEAVING = 3;
+const default_ship = kind => ({
+  kind,
+  gp: 100,
+  inv: ship_data("supply", kind),
+
+  state: SHIP_STATE_UNINIT,
+  tick_spawn: null,
+  tick_leave: null,
+  x:  0.10,
+  y: -0.05,
+
+  window_x: 0.18,
+  window_y: 0.02,
+  window_width: 0.6,
+  window_height: 0.3,
+});
 
 const DRAG_STATE_INACTIVE = 0;
 const DRAG_STATE_CAMERA   = 1;
@@ -81,24 +98,13 @@ const default_render_cache = () => ({
 });
 let render_cache = default_render_cache();
 const default_state = () => ({
+  ships_docked: 0,
   tick: 0,
   island: {
     gp: 0,
-    barrel_count: 1,
+    inv: [ ITEM_BARREL_RUM ],
   },
-  ship: {
-    gp: 100,
-    state: SHIP_STATE_DOCKING,
-    tick_spawn: 0,
-    tick_leave: null,
-    barrel_count: 3,
-    x:  0.10,
-    y: -0.05,
-    window_x: 0.18,
-    window_y: 0.02,
-    window_width: 0.6,
-    window_height: 0.3,
-  },
+  ship: default_ship(SHIP_KIND_FISH_BOAT),
   cam_x: -0.15,
   cam_y: -0.29,
   mouse_x: 0,
@@ -174,10 +180,104 @@ window.onload = function frame(elapsed) {
 
 function update(state) {
 
-  /* doing timing via ticks rather than setTimeouts allows for
-   * more hot-swappability (how do you serialize a setTimeout?) */
   state.tick++;
 
+}
+
+const ITEM_BARREL_HERRING = 0;
+const ITEM_BARREL_KIPPERS = 1;
+const ITEM_BARREL_RUM     = 2;
+
+// const SHIP_ISLAND            = 0;
+const SHIP_KIND_FISH_BOAT         = 0;
+const SHIP_KIND_STORE_SHIP        = 1;
+const SHIP_KIND_CONVICT_TRANSPORT = 2;
+
+function ship_data(mode, ship, item) {
+  const mode_name   = mode == "name";
+  const mode_supply = mode == "supply";
+  const mode_price  = mode == "buy_for" || mode == "sell_for";
+  const buy_for     = mode == "buy_for";
+  const sell_for    = mode == "sell_for";
+
+  if (ship == SHIP_KIND_FISH_BOAT && mode_name)
+    return "FISH BOAT";
+  if (ship == SHIP_KIND_FISH_BOAT && mode_supply) {
+    return [
+      ITEM_BARREL_HERRING,
+      ITEM_BARREL_HERRING,
+      ITEM_BARREL_HERRING,
+    ];
+  }
+  if (ship == SHIP_KIND_FISH_BOAT && mode_price) {
+    /* dude please take the fish please im begging u */
+    if (item == ITEM_BARREL_HERRING &&  buy_for) return 4;
+    if (item == ITEM_BARREL_HERRING && sell_for) return 10;
+
+    /* oh you cooked it for me? thanks ig */
+    if (item == ITEM_BARREL_KIPPERS &&  buy_for) return 15;
+    if (item == ITEM_BARREL_KIPPERS && sell_for) return 20;
+
+    /* YOOOOHOOHOHOOO */
+    if (item == ITEM_BARREL_RUM     &&  buy_for) return 20;
+    if (item == ITEM_BARREL_RUM     && sell_for) return 200;
+
+    return 0;
+  }
+
+  if (ship == SHIP_KIND_STORE_SHIP && mode_name)
+    return "STORE SHIP";
+  if (ship == SHIP_KIND_STORE_SHIP && mode_supply) {
+    return [
+      ITEM_BARREL_RUM,
+      ITEM_BARREL_RUM,
+      ITEM_BARREL_RUM,
+      ITEM_BARREL_RUM,
+      ITEM_BARREL_KIPPERS,
+    ];
+  }
+  if (ship == SHIP_KIND_STORE_SHIP && mode_price) {
+    /* sure these are nice to have on board */
+    if (item == ITEM_BARREL_HERRING &&  buy_for) return 10;
+    if (item == ITEM_BARREL_HERRING && sell_for) return 15;
+
+    /* edible food? that's what we're here for! */
+    if (item == ITEM_BARREL_KIPPERS &&  buy_for) return 25;
+    if (item == ITEM_BARREL_KIPPERS && sell_for) return 30;
+
+    /* we have so much of it */
+    if (item == ITEM_BARREL_RUM     &&  buy_for) return 10;
+    if (item == ITEM_BARREL_RUM     && sell_for) return 15;
+
+    return 0;
+  }
+
+  if (ship == SHIP_KIND_CONVICT_TRANSPORT && mode_name)
+    return "CONVICT TRANSPORT";
+  if (ship == SHIP_KIND_CONVICT_TRANSPORT && mode_supply) {
+    return [
+      ITEM_BARREL_KIPPERS,
+      ITEM_BARREL_KIPPERS,
+    ];
+  }
+  if (ship == SHIP_KIND_CONVICT_TRANSPORT && mode_price) {
+    /* i dont want your stanky ass fish */
+    if (item == ITEM_BARREL_HERRING &&  buy_for) return 2;
+    if (item == ITEM_BARREL_HERRING && sell_for) return 5;
+
+    /* i mean, gotta feed these losers somehow ... */
+    if (item == ITEM_BARREL_KIPPERS &&  buy_for) return 20;
+    if (item == ITEM_BARREL_KIPPERS && sell_for) return 25;
+
+    /* god yes please the prisoners are so boring there's nothing to do */
+    if (item == ITEM_BARREL_RUM     &&  buy_for) return 30;
+    if (item == ITEM_BARREL_RUM     && sell_for) return 300;
+
+    return 0;
+  }
+
+  /* COLLIER: sells coal, will take kippers and rum */
+  return "???";
 }
 
 const DOCK_START_X = 0.5 - 0.11;
@@ -385,7 +485,7 @@ function island(mode, state, { ctx, elapsed }={}) {
     }
   }
 
-  const barrel_count = state.island.barrel_count;
+  const barrel_count = state.island.inv.length;
 
   let highlight_barrel, i = 0;
   const barrelhack = (x, y, angle) => {
@@ -430,6 +530,11 @@ function island(mode, state, { ctx, elapsed }={}) {
 }
 
 function ship_ui(state, ship, mode, { ctx, elapsed }={}) {
+  if (ship.state == SHIP_STATE_UNINIT) {
+    ship.tick_spawn = state.tick;
+    ship.state = SHIP_STATE_DOCKING;
+  }
+
   const mode_render       = mode == "render";
   const mode_ui           = mode == "ui";
   const mode_mousedown    = mode == "mousedown";
@@ -458,9 +563,10 @@ function ship_ui(state, ship, mode, { ctx, elapsed }={}) {
     const   end_x = x + px*0.5;
     const   end_y = y + py*0.5;
     const dist = mag(start_x - end_x, start_y - end_y);
+    const speed = 0.15;
 
     if (ship.state == SHIP_STATE_DOCKING) {
-      const trip_ticks = SECOND_IN_TICKS * (dist / 0.1);
+      const trip_ticks = SECOND_IN_TICKS * (dist / speed);
       let t = (state.tick - ship.tick_spawn) / trip_ticks;
       if (t < 1) {
         if (ship.tick_leave != null) t = 1 - ease_out_quad(1 - t);
@@ -471,7 +577,7 @@ function ship_ui(state, ship, mode, { ctx, elapsed }={}) {
         ship.state = SHIP_STATE_DOCKED;
     }
     if (ship.state == SHIP_STATE_LEAVING) {
-      const trip_ticks = SECOND_IN_TICKS * (dist / 0.1);
+      const trip_ticks = SECOND_IN_TICKS * (dist / speed);
       let t = (state.tick - ship.tick_leave) / trip_ticks;
       if (t < 1) {
         if (ship.tick_leave != null) t = 1 - ease_out_quad(1 - t);
@@ -479,13 +585,15 @@ function ship_ui(state, ship, mode, { ctx, elapsed }={}) {
         x = lerp(x, end_x, t);
         y = lerp(y, end_y, t);
       }
-      else
-        ;
+      else {
+        state.ship = default_ship((++state.ships_docked)%3);
+        return ship_ui(state, state.ship, mode, { ctx, elapsed });
+      }
     }
 
     const angle = Math.atan2(end_y - start_y, end_x - start_x);
     if (mode_render) {
-      boat_big("render", state, x, y, angle, ship.barrel_count, {
+      boat_big("render", state, x, y, angle, ship.inv.length, {
         ctx,
         highlight_barrel: ship_ui(state, ship, "hover_barrel").ship_barrel_i
       });
@@ -494,8 +602,8 @@ function ship_ui(state, ship, mode, { ctx, elapsed }={}) {
     if (mode_hover_barrel)
       hover_barrel_ret.ship_barrel_i =
         boat_big("hover_barrel",
-          state, x, y, angle, ship.barrel_count);
-    // draw_boat_small(state, ctx, 0.1,  0.20, ship.barrel_count);
+          state, x, y, angle, ship.inv.length);
+    // draw_boat_small(state, ctx, 0.1,  0.20, ship.inv.length);
   }
 
   const aabb = {
@@ -518,12 +626,14 @@ function ship_ui(state, ship, mode, { ctx, elapsed }={}) {
   let hovered = {};
 
   for (let side = 0; side < 2; side++) {
+    if (ship.state != SHIP_STATE_DOCKED) continue;
+
     const side_ship   = side == 0;
     const side_island = side == 1;
 
     const   inv = side_ship ? ship : state.island;
     const o_inv = side_ship ? state.island : ship;
-    const title = side_ship ? "FISH BOAT" : `YOU | ${inv.gp}gp`;
+    const title = side_ship ? ship_data("name", ship.kind) : `YOU | ${inv.gp}gp`;
 
     if (mode_ui) ctx.save();
     let { x, y, w, h } = aabb;
@@ -587,7 +697,7 @@ function ship_ui(state, ship, mode, { ctx, elapsed }={}) {
       }
       hr();
 
-      const entry_count = inv.barrel_count + side_ship;
+      const entry_count = inv.inv.length + side_ship;
 
       const entry_pad = fh*0.4;
       const entry_height = 0.26;
@@ -678,7 +788,7 @@ function ship_ui(state, ship, mode, { ctx, elapsed }={}) {
             ctx.save();
             ctx.translate(fh*5, y + fh*0.1);
             ctx.scale(2, 2);
-            boat_big("render", state, 0, 0, 0, ship.barrel_count, { ctx });
+            boat_big("render", state, 0, 0, 0, ship.inv.length, { ctx });
             ctx.restore();
           }
 
@@ -695,12 +805,28 @@ function ship_ui(state, ship, mode, { ctx, elapsed }={}) {
             return true;
           }
         } else {
-          const val = 20;
+          const inv_i = i - side_ship;
+
+          const val = ship_data(
+            side_ship ? "sell_for" : "buy_for",
+            ship.kind,
+            inv.inv[inv_i]
+          );
 
           if (mode_ui) {
             ctx.fillStyle = text_fill;
-            ctx.fillText("Barrel o'", fh*3.8, y);
-            ctx.fillText("Herring"  , fh*3.8, y + fh);
+            if (inv.inv[inv_i] == ITEM_BARREL_HERRING) {
+              ctx.fillText("Barrel o'", fh*3.8, y);
+              ctx.fillText("Herring"  , fh*3.8, y + fh);
+            }
+            if (inv.inv[inv_i] == ITEM_BARREL_KIPPERS) {
+              ctx.fillText("Barrel o'", fh*3.8, y);
+              ctx.fillText("Kippers"  , fh*3.8, y + fh);
+            }
+            if (inv.inv[inv_i] == ITEM_BARREL_RUM) {
+              ctx.fillText("Barrel o'", fh*3.8, y);
+              ctx.fillText("Rum"      , fh*3.8, y + fh);
+            }
 
             const valstr = (''+val).padStart(5);
             ctx.fillText(valstr, fh* 8.5, y + fh*0.2);
@@ -712,12 +838,12 @@ function ship_ui(state, ship, mode, { ctx, elapsed }={}) {
           if (action == "BUY" ) txt_clr = text_fill_red;
           if (action == "SELL") txt_clr = text_fill_green;
           if (btn(action, txt_clr, fh*10.5, y + fh* 1.5)) {
-            if (inv.barrel_count > 0 && o_inv.gp >= val) {
-              inv.barrel_count--;
+            if (inv.inv.length > 0 && o_inv.gp >= val) {
+              const item = inv.inv.splice(inv_i, 1);
               inv.gp += val;
 
               o_inv.gp -= val;
-              o_inv.barrel_count++;
+              o_inv.inv.push(item);
 
               state.drag.state = DRAG_STATE_INACTIVE;
               return true;
